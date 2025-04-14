@@ -69,7 +69,7 @@ impl Exchange {
     /// * `order` - The order to post
     /// * `pair` - The pair of the order
     pub fn post_order(&mut self, order: Order, pair: Pair) -> Result<()> {
-        if order.side.clone() == Side::Bid {
+        if order.side == Side::Bid {
             self.remove_balance(
                 order.account_id.clone(),
                 pair.numeraire,
@@ -117,10 +117,10 @@ impl Exchange {
             .markets
             .entry(pair)
             .or_insert(Market::new(pair))
-            .cancel_order(order_id, side.clone(), price);
+            .cancel_order(order_id, side, price);
 
         if let Some(order) = order {
-            if side.clone() == Side::Bid {
+            if side == Side::Bid {
                 self.add_balance(
                     order.account_id,
                     pair.numeraire,

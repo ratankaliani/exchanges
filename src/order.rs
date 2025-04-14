@@ -1,7 +1,7 @@
 use std::ops::{Add, Sub};
 
 /// Represents the side of an order - either a bid (buy) or ask (sell)
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Side {
     #[default]
     Bid,
