@@ -1,12 +1,8 @@
-use std::collections::HashMap;
-
 use crate::{
-    account_manager::AccountManager,
     asset::Asset,
     matching::{MatchingEngine, Trade},
-    order::{AccountId, Order, OrderId, Price, Side},
+    order::{Order, OrderId, Price, Side},
 };
-use anyhow::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Pair {

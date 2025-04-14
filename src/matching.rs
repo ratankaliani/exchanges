@@ -1,6 +1,3 @@
-use std::collections::VecDeque;
-
-use crate::market::Market;
 use crate::order::{AccountId, Order, OrderId, Price, Quantity, Side};
 use crate::orderbook::OrderBook;
 
