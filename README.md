@@ -9,4 +9,10 @@
 
 ## Perpetuals
 
+- [ ] Orderbook
+- [ ] Matching Engine
+- [ ] Accounts
+- [ ] Exchange
+- [ ] Implement Basic Terminal UI, then Web UI
+
 TODO: Implement funding mechanism
