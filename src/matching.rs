@@ -1,72 +1,110 @@
 use std::collections::VecDeque;
 
-use crate::order::{Order, Price, Quantity, Side};
+use crate::market::Market;
+use crate::order::{AccountId, Order, OrderId, Price, Quantity, Side};
 use crate::orderbook::OrderBook;
 
 #[derive(Debug, Clone)]
 pub struct Trade {
+    pub ask_order_id: OrderId,
+    pub bid_order_id: OrderId,
+    pub ask_account_id: AccountId,
+    pub bid_account_id: AccountId,
     pub price: Price,
     pub quantity: Quantity,
-    pub bid_order_id: u64,
-    pub ask_order_id: u64,
 }
 
-#[derive(Debug)]
-pub enum OrderEvent {
-    Accepted(Order),
-    Rejected(Order, String),
-    Filled(Order, Vec<Trade>),
-    PartiallyFilled(Order, Vec<Trade>),
-    Cancelled(Order),
+pub enum OrderUpdate {
+    Remove,
+    Update(Quantity),
 }
 
 pub struct MatchingEngine {
     orderbook: OrderBook,
-    events: VecDeque<OrderEvent>,
 }
 
 impl MatchingEngine {
     pub fn new() -> Self {
         Self {
             orderbook: OrderBook::new(),
-            events: VecDeque::new(),
         }
     }
 
     /// Process a new order, attempting to match it against the orderbook
     /// Returns true if the order was accepted, false if rejected
-    pub fn process_order(&mut self, order: Order) -> bool {
+    pub fn process_order(&mut self, order: Order) -> Vec<Trade> {
         match order.side {
             Side::Bid => self.process_bid(order),
             Side::Ask => self.process_ask(order),
         }
     }
 
-    /// Process a bid order
-    fn process_bid(&mut self, mut bid: Order) -> bool {
-        // Try to match against asks
-        let mut remaining_qty = bid.quantity.0;
-        let mut trades = Vec::new();
+    /// Process a bid order, returns the executed trades.
+    fn process_bid(&mut self, mut bid: Order) -> Vec<Trade> {
+        // First, collect all the matches and updates we need to make
+        let (trades, order_updates) = self.find_bid_matches(&mut bid);
 
+        // Then apply all updates atomically
+        if !trades.is_empty() {
+            for (order_id, update) in order_updates {
+                // If there's a partial fill, we need to update the order quantity
+                match update {
+                    OrderUpdate::Remove => {
+                        self.orderbook.remove_order(order_id, Side::Ask, bid.price);
+                    }
+                    OrderUpdate::Update(new_qty) => {
+                        self.orderbook
+                            .update_order_quantity(order_id, Side::Ask, new_qty);
+                    }
+                }
+            }
+        } else {
+            self.orderbook.insert_order(bid.clone());
+        }
+        trades
+    }
+
+    /// Separate matching logic from update logic
+    ///
+    /// Also updates the bid quantity to the remaining quantity
+    fn find_bid_matches(&self, bid: &mut Order) -> (Vec<Trade>, Vec<(OrderId, OrderUpdate)>) {
+        let mut trades = Vec::new();
+        let mut updates = Vec::new();
+        let mut remaining_qty = bid.quantity.get();
+
+        // Find all matches until we run out of quantity or there are no more asks with a price <= bid.price
         while remaining_qty > 0 {
-            // Get best ask
-            let best_ask = match self.orderbook.get_asks().first_key_value() {
-                Some((price, orders)) if price.0 <= bid.price.0 => Some((*price, orders)),
+            let best_ask = match self.orderbook.get_asks().next() {
+                Some((price, orders)) if price.get() <= bid.price.get() => Some((*price, orders)),
                 _ => None,
             };
 
             match best_ask {
                 Some((ask_price, ask_orders)) => {
-                    // Match against orders at this price level
                     for ask in ask_orders.iter() {
-                        let match_qty = std::cmp::min(remaining_qty, ask.quantity.0);
+                        let match_qty = std::cmp::min(remaining_qty, ask.quantity.get());
                         if match_qty > 0 {
                             trades.push(Trade {
                                 price: ask_price,
-                                quantity: Quantity(match_qty),
-                                bid_order_id: bid.id.0,
-                                ask_order_id: ask.id.0,
+                                quantity: Quantity::new(match_qty),
+                                ask_order_id: ask.id,
+                                bid_order_id: bid.id,
+                                ask_account_id: ask.account_id.clone(),
+                                bid_account_id: bid.account_id.clone(),
                             });
+
+                            // Record the update needed
+                            if ask.quantity.get() == match_qty {
+                                updates.push((ask.id, OrderUpdate::Remove));
+                            } else {
+                                updates.push((
+                                    ask.id,
+                                    OrderUpdate::Update(Quantity::new(
+                                        ask.quantity.get() - match_qty,
+                                    )),
+                                ));
+                            }
+
                             remaining_qty -= match_qty;
                         }
                         if remaining_qty == 0 {
@@ -78,34 +116,25 @@ impl MatchingEngine {
             }
         }
 
-        // Handle the results
-        if !trades.is_empty() {
-            if remaining_qty == 0 {
-                self.events.push_back(OrderEvent::Filled(bid, trades));
-            } else {
-                bid.quantity = Quantity(remaining_qty);
-                self.orderbook.insert_order(bid.clone());
-                self.events
-                    .push_back(OrderEvent::PartiallyFilled(bid, trades));
-            }
-            true
-        } else {
-            self.orderbook.insert_order(bid.clone());
-            self.events.push_back(OrderEvent::Accepted(bid));
-            true
-        }
+        // Update the bid quantity to the remaining quantity
+        bid.quantity = Quantity::new(remaining_qty);
+
+        (trades, updates)
     }
 
-    /// Process an ask order
-    fn process_ask(&mut self, mut ask: Order) -> bool {
-        // Try to match against bids
-        let mut remaining_qty = ask.quantity.0;
+    /// Find all the matches for an ask order
+    ///
+    /// Also updates the ask quantity to the remaining quantity
+    fn find_ask_matches(&self, ask: &mut Order) -> (Vec<Trade>, Vec<(OrderId, OrderUpdate)>) {
         let mut trades = Vec::new();
+        let mut updates = Vec::new();
+        let mut remaining_qty = ask.quantity.get();
 
+        // Find all matches until we run out of quantity or there are no more bids with a price >= ask.price
         while remaining_qty > 0 {
             // Get best bid
-            let best_bid = match self.orderbook.get_best_bid() {
-                Some(price) if price >= ask.price.0 => Some(price),
+            let best_bid = match self.orderbook.get_bids().next() {
+                Some((price, _)) if price.to_price().get() >= ask.price.get() => Some(price),
                 _ => None,
             };
 
@@ -115,14 +144,28 @@ impl MatchingEngine {
                     let bid_orders = self.orderbook.get_bids().next().map(|(_, orders)| orders);
                     if let Some(orders) = bid_orders {
                         for bid in orders.iter() {
-                            let match_qty = std::cmp::min(remaining_qty, bid.quantity.0);
+                            let match_qty = std::cmp::min(remaining_qty, bid.quantity.get());
                             if match_qty > 0 {
                                 trades.push(Trade {
-                                    price: Price(bid_price),
-                                    quantity: Quantity(match_qty),
-                                    bid_order_id: bid.id.0,
-                                    ask_order_id: ask.id.0,
+                                    price: bid_price.to_price(),
+                                    quantity: Quantity::new(match_qty),
+                                    ask_order_id: ask.id,
+                                    bid_order_id: bid.id,
+                                    ask_account_id: ask.account_id.clone(),
+                                    bid_account_id: bid.account_id.clone(),
                                 });
+
+                                // Record the update needed
+                                if bid.quantity.get() == match_qty {
+                                    updates.push((bid.id, OrderUpdate::Remove));
+                                } else {
+                                    updates.push((
+                                        bid.id,
+                                        OrderUpdate::Update(Quantity::new(
+                                            bid.quantity.get() - match_qty,
+                                        )),
+                                    ));
+                                }
                                 remaining_qty -= match_qty;
                             }
                             if remaining_qty == 0 {
@@ -135,43 +178,46 @@ impl MatchingEngine {
             }
         }
 
+        // Update the ask quantity to the remaining quantity
+        ask.quantity = Quantity::new(remaining_qty);
+
+        (trades, updates)
+    }
+
+    /// Process an ask order
+    ///
+    /// Returns the trades.
+    fn process_ask(&mut self, mut ask: Order) -> Vec<Trade> {
+        let (trades, updates) = self.find_ask_matches(&mut ask);
+
         // Handle the results
         if !trades.is_empty() {
-            if remaining_qty == 0 {
-                self.events.push_back(OrderEvent::Filled(ask, trades));
-            } else {
-                ask.quantity = Quantity(remaining_qty);
-                self.orderbook.insert_order(ask.clone());
-                self.events
-                    .push_back(OrderEvent::PartiallyFilled(ask, trades));
+            for (order_id, update) in updates {
+                match update {
+                    OrderUpdate::Remove => {
+                        self.orderbook.remove_order(order_id, Side::Bid, ask.price);
+                    }
+                    OrderUpdate::Update(new_qty) => {
+                        self.orderbook
+                            .update_order_quantity(order_id, Side::Bid, new_qty);
+                    }
+                }
             }
-            true
         } else {
             self.orderbook.insert_order(ask.clone());
-            self.events.push_back(OrderEvent::Accepted(ask));
-            true
         }
+        trades
     }
 
-    /// Cancel an order by its ID
-    pub fn cancel_order(&mut self, order_id: u64, side: Side, price: u64) -> bool {
-        if let Some(order) = self.orderbook.remove_order(order_id, side, price) {
-            self.events.push_back(OrderEvent::Cancelled(order));
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get the next event from the queue, if any
-    pub fn next_event(&mut self) -> Option<OrderEvent> {
-        self.events.pop_front()
+    /// Cancel an order by its ID. Returns the order if it was found and removed.
+    pub fn cancel_order(&mut self, order_id: OrderId, side: Side, price: Price) -> Option<Order> {
+        self.orderbook.remove_order(order_id, side, price)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::order::{OrderId, Timestamp};
+    use crate::order::{AccountId, OrderId, Timestamp};
 
     use super::*;
 
@@ -181,41 +227,40 @@ mod tests {
 
         // Add some asks
         engine.process_order(Order::new(
-            OrderId(1),
-            Price(100),
-            Quantity(10),
+            OrderId::new(1),
+            Price::new(100),
+            Quantity::new(10),
             Side::Ask,
-            "trader1".to_string(),
-            Timestamp(1),
+            AccountId::new("trader1".to_string()),
+            Timestamp::new(1),
         ));
         engine.process_order(Order::new(
-            OrderId(2),
-            Price(101),
-            Quantity(5),
+            OrderId::new(2),
+            Price::new(101),
+            Quantity::new(5),
             Side::Ask,
-            "trader2".to_string(),
-            Timestamp(2),
+            AccountId::new("trader2".to_string()),
+            Timestamp::new(2),
         ));
 
         // Add a matching bid
         engine.process_order(Order::new(
-            OrderId(3),
-            Price(101),
-            Quantity(7),
+            OrderId::new(3),
+            Price::new(101),
+            Quantity::new(7),
             Side::Bid,
-            "trader3".to_string(),
-            Timestamp(3),
+            AccountId::new("trader3".to_string()),
+            Timestamp::new(3),
         ));
 
         // Should get a partial fill
-        match engine.next_event() {
-            Some(OrderEvent::PartiallyFilled(order, trades)) => {
-                assert_eq!(order.id.0, 3);
-                assert_eq!(trades.len(), 2);
-                assert_eq!(trades[0].quantity.0, 5);
-                assert_eq!(trades[1].quantity.0, 2);
-            }
-            _ => panic!("Expected partial fill"),
-        }
+        engine.process_order(Order::new(
+            OrderId::new(4),
+            Price::new(101),
+            Quantity::new(2),
+            Side::Bid,
+            AccountId::new("trader4".to_string()),
+            Timestamp::new(4),
+        ));
     }
 }

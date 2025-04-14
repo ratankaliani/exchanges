@@ -4,8 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "launch"
-path = "bin/launch.rs"
+name = "matching_engine_burst"
+path = "bin/matching_engine_burst.rs"
+
+[[bin]]
+name = "exchange_burst"
+path = "bin/exchange_burst.rs"
 
 [dependencies]
+anyhow = "1.0.98"
 rand = "0.9.0"

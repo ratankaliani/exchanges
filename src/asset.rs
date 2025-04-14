@@ -1,6 +1,10 @@
-use std::fmt;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Asset {
-    pub symbol: String,
+    pub symbol: &'static str,
+}
+
+impl Asset {
+    pub fn new(symbol: &'static str) -> Self {
+        Self { symbol }
+    }
 }

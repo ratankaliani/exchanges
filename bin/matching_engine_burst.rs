@@ -1,6 +1,6 @@
 use exchanges::{
     matching::MatchingEngine,
-    order::{Order, OrderId, Price, Quantity, Side, Timestamp},
+    order::{AccountId, Order, OrderId, Price, Quantity, Side, Timestamp},
 };
 use rand::{Rng, rng};
 use std::time::Instant;
@@ -18,16 +18,16 @@ fn main() {
         } else {
             Side::Ask
         };
-        let price = Price(rng.random_range(90..110));
-        let quantity = Quantity(rng.random_range(1..100));
+        let price = Price::new(rng.random_range(90..110));
+        let quantity = Quantity::new(rng.random_range(1..100));
 
         let order = Order::new(
-            OrderId(i),
+            OrderId::new(i),
             price,
             quantity,
             side,
-            format!("trader{}", rng.random_range(1..100)),
-            Timestamp(i),
+            AccountId::new(format!("trader{}", rng.random_range(1..100))),
+            Timestamp::new(i),
         );
 
         engine.process_order(order);
